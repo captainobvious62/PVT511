@@ -699,6 +699,298 @@ def PbEstimate(z,T,Pc,Tc,omega):
 def PdewEstimate(v,T,Pc,Tc,omega):
     Pdew = np.sum(v / np.exp(5.373*(1 + omega * (1 - Tc/T))))
     return Pdew            
+
+# Horrendous function to encapsulate Pedersen style split
+
+
+def SplitCalc(F8Comp,c_min,c_max,eptol,coeff):
+    ##############################################################################80
+    # Try to solve for A,B,C,D, *AGAIN*
+    ##############################################################################80
+    # Initial Characterization Constant Estimates
+    A = -3.0
+    B = -0.1
+    C =  0.5
+    D =  0.1
+
+
+
+    # misc
+    c6offset = c_min - 7
+    numcomps = c_max - c_min + 1
+
+
+    # Data Structures
+    SCN     = np.arange(c_min,c_max+1)
+    Vec_R   = np.zeros(2)
+    Vec_R0  = np.zeros(2)
+    Vec_V   = np.zeros(2)
+    Mat_J   = np.zeros([2,2])
+
+
+
+    # Plus Frac z
+    z_cnplus = np.sum(F8Comp['z'][10+c6offset:].as_matrix())
+
+    # Plus Frac MW
+    MW_cnplus = np.sum( F8Comp['z'][10+c6offset:].as_matrix() *                    \
+                        F8Comp['MW'][10+c6offset:].as_matrix() ) /                 \
+                np.sum( F8Comp['z'][10+c6offset:].as_matrix() )
+
+    # Plus Frac rho
+    rho_cnplus = np.sum( F8Comp['z'][10+c6offset:].as_matrix() *                   \
+                        F8Comp['MW'][10+c6offset:].as_matrix() ) /                 \
+                        np.sum( (F8Comp['z'][10+c6offset:].as_matrix() *           \
+                        F8Comp['MW'][10+c6offset:].as_matrix() ) / F8Comp['rho'][10+c6offset:].as_matrix() )
+
+    # Last TBP Frac rho
+    rho_cnminus = F8Comp['rho'][10+c6offset-1]
+
+
+
+    # Initialize solution vector
+    Vec_V[0]    = A
+    Vec_V[1]    = B
+
+
+    # Solve for A and B
+    for i in range(0,1000):
+    # Initial residual function
+        Vec_R0[:]   = Vec_R[:] 
+        Vec_R[0]    = Ped_R1(z_cnplus,A,B,SCN)
+        Vec_R[1]    = Ped_R2(z_cnplus,MW_cnplus,A,B,SCN)
+
+        Mat_J[0,0] =  (Ped_R1(z_cnplus,A+eptol,B,SCN) - Ped_R1(z_cnplus,A-eptol,B,SCN)) / (2*eptol)
+        Mat_J[0,1] =  (Ped_R1(z_cnplus,A,B+eptol,SCN) - Ped_R1(z_cnplus,A,B-eptol,SCN)) / (2*eptol)
+        Mat_J[1,0] =  (Ped_R2(z_cnplus,MW_cnplus,A+eptol,B,SCN) - Ped_R2(z_cnplus,MW_cnplus,A-eptol,B,SCN)) / (2*eptol)
+        Mat_J[1,1] =  (Ped_R2(z_cnplus,MW_cnplus,A,B+eptol,SCN) - Ped_R2(z_cnplus,MW_cnplus,A,B-eptol,SCN)) / (2*eptol)            
+            
+        # Get Delta V result
+        Vec_dV = np.linalg.solve(Mat_J,-1.*Vec_R)
+        # Update V
+        Vec_V = Vec_V + Vec_dV
+        A = Vec_V[0]
+        B = Vec_V[1]
+        if np.all(np.abs(Vec_R0 - Vec_R) < eptol*2):
+            break
+        
+        #print(Vec_V, Vec_R)
+        
+    # Construct MF array for expansion
+    z_exp   = Ped_z(A,B,SCN)
+    MW_exp  = Ped_MW(SCN)
+    z_exp_init = z_exp.copy()
+    MW_exp_init = MW_exp.copy()
+
+    # Solve for C and D
+
+    Vec_V[0]    = C
+    Vec_V[1]    = D
+    Vec_R0[:]   = 0.0
+    Vec_R[:]    = 0.0
+
+    for i in range(0,1000):
+        Vec_R0[:]   = Vec_R[:] 
+        Vec_R[0]    = Ped_R3(rho_cnplus,A,B,C,D,SCN)
+        Vec_R[1]    = Ped_R4(rho_cnminus,C,D,c_min-1)
+
+        Mat_J[0,0] =  ( Ped_R3(rho_cnplus,A,B,C+eptol,D,SCN)  - Ped_R3(rho_cnplus,A,B,C-eptol,D,SCN)  ) / (2*eptol)
+        Mat_J[0,1] =  ( Ped_R3(rho_cnplus,A,B,C,D+eptol,SCN)  - Ped_R3(rho_cnplus,A,B,C,D-eptol,SCN)  ) / (2*eptol)
+        Mat_J[1,0] =  ( Ped_R4(rho_cnminus,C+eptol,D,c_min-1) - Ped_R4(rho_cnminus,C-eptol,D,c_min-1) ) / (2*eptol)
+        Mat_J[1,1] =  ( Ped_R4(rho_cnminus,C,D+eptol,c_min-1) - Ped_R4(rho_cnminus,C,D-eptol,c_min-1) ) / (2*eptol)
+            
+        # Get Delta V result
+        Vec_dV = np.linalg.solve(Mat_J,-1.*Vec_R)
+        # Update V
+        Vec_V = Vec_V + Vec_dV
+        C = Vec_V[0]
+        D = Vec_V[1]
+        if np.all(np.abs(Vec_R0 - Vec_R) < eptol*2):
+            break
+        
+        #print(Vec_V, Vec_R)
+
+
+    ##############################################################################80
+    # Cn+ Property Estimates (c_min to c_max)
+    ##############################################################################80
+    z_cnexp         = Ped_z(A,B,SCN)
+    rho_cnexp       = Ped_rho(C,D,SCN)
+    MW_cnexp        = Ped_MW(SCN)
+    Tc_cnexp        = Ped_Tc(coeff,rho_cnexp,MW_cnexp)
+    Pc_cnexp        = Ped_Pc(coeff,rho_cnexp,MW_cnexp)
+    omega_cnexp     = Ped_omega(coeff,rho_cnexp,MW_cnexp)
+
+    ##############################################################################80
+    # Plotting / Overall Data
+    ##############################################################################80
+    z           =   np.zeros(c_max - 7 + 1)
+    Pc          =   np.zeros(c_max - 7 + 1)
+    Tc          =   np.zeros(c_max - 7 + 1)
+    MW          =   np.zeros(c_max - 7 + 1)
+    omega       =   np.zeros(c_max - 7 + 1)
+    rho         =   np.zeros(c_max - 7 + 1)
+    C_num       =   np.arange(7,c_max + 1)
+
+    z_exp           =   np.zeros(c_max - 7 + 12)
+    y_exp           =   np.zeros(c_max - 7 + 12)
+    x_exp           =   np.zeros(c_max - 7 + 12)
+    Pc_exp          =   np.zeros(c_max - 7 + 12)
+    Tc_exp          =   np.zeros(c_max - 7 + 12)
+    MW_exp          =   np.zeros(c_max - 7 + 12)
+    omega_exp       =   np.zeros(c_max - 7 + 12)
+    rho_exp         =   np.zeros(c_max - 7 + 12)
+    comps_exp       =   np.ndarray(c_max - 7 + 12)
+    comps_exp       =   comps_exp.astype('object')
+    om_a_exp = 0.42748 * np.ones(c_max - 7 + 12) # [-]
+    om_b_exp = 0.08664 * np.ones(c_max - 7 + 12) # [-]
+
+
+    z_in        =   F8Comp['z'].as_matrix()
+    MW_in       =   F8Comp['MW'].as_matrix()
+    rho_in      =   F8Comp['rho'].as_matrix()
+    y_in        =   F8Comp['y'].as_matrix()
+    Pc_in       =   Ped_Pc(coeff,rho_in,MW_in)
+    Tc_in       =   Ped_Tc(coeff,rho_in,MW_in)
+    omega_in    =   Ped_omega(coeff,rho_in,MW_in)
+    om_a_in = 0.42748 * np.ones(z_in.size) # [-]
+    om_b_in = 0.08664 * np.ones(z_in.size) # [-]
+
+    z[-1*z_cnexp.size:] = z_cnexp[:]
+    Pc[-1*z_cnexp.size:] = Pc_cnexp[:]
+    Tc[-1*z_cnexp.size:] = Tc_cnexp[:]
+    MW[-1*z_cnexp.size:] = MW_cnexp[:]
+    omega[-1*z_cnexp.size:] = omega_cnexp[:]
+    rho[-1*z_cnexp.size:] = rho_cnexp[:]
+
+    # MF Gasses:
+    z_c6minus = np.sum(z_in[0:11])
+
+
+    if c_min > 7:
+        i           = c_min - 7
+        z[:i]       = z_in[11:i     + 11]
+        MW[:i]      = MW_in[11:i    + 11]
+        rho[:i]     = rho_in[11:i   + 11]    
+        Pc[:i]      = Pc_in[11:i    + 11]    
+        Tc[:i]      = Tc_in[11:i    + 11]        
+        omega[:i]   = omega_in[11:i + 11]        
+
+    # Derived Values
+
+    MassFrac  = (z*MW) / np.sum(z*MW) * 100
+    cummass   = np.cumsum(z) / np.sum(z)
+    #cummass[c_min:]   = z[c_min:]
+    #cummass[:c_min]   =   np.cumsum(cummass[:c_min])
+    #cummass[c_min:]   =   np.cumsum(cummass[c_min:])  + (1 - z_cnplus)
+    # wn for SRK
+
+    ##############################################################################80
+    # Generate Plots of Extrapolated Values
+    ##############################################################################80
+    # MF, rho, cmin to cmax
+    fig, ax_MF  = plt.subplots(figsize=(10, 6))
+    ax_rho       = ax_MF.twinx()
+    ax_MF.plot(C_num,z,'r--')   
+    ax_rho.plot(C_num,rho,'b')
+    plt.tight_layout()
+
+    ax_MF.set_xlim(7,SCN[-1])
+    ax_MF.set_ylabel('Mole Fraction')
+    ax_MF.set_xlabel('Carbon Number')
+    ax_rho.set_ylabel('Density, g/cc')
+    plt.savefig('1_rho_MF.png',frameon=True,bbox_inches='tight',padinches=0.1)
+    plt.close('all')
+    # Pc, Tc, cmin to cmax
+    fig, ax_Pc  = plt.subplots(figsize=(10, 5))
+    ax_Tc       = ax_Pc.twinx()
+    ax_Tc.plot(C_num,Tc,'r--')   
+    ax_Pc.plot(C_num,Pc,'b')
+    ax_Pc.set_xlim(7,SCN[-1])
+    plt.tight_layout()
+
+    ax_Tc.set_ylabel('Critical Temperature, Deg. Kelvin')
+    ax_Pc.set_xlabel('Carbon Number')
+    ax_Pc.set_ylabel('Critical Pressure, atm')
+    plt.savefig('1_Pc_Tc.png',frameon=True,bbox_inches='tight',padinches=0.1)
+    plt.clf()
+
+    # Mass Frac, % of total cmin to cmax
+    fig, ax_MW  = plt.subplots(figsize=(10, 6))
+    ax_sum      = ax_MW.twinx()
+    ax_MW.plot(C_num,MassFrac,'r--')   
+    ax_sum.plot(C_num,cummass,'b')
+    plt.tight_layout()
+
+    ax_sum.set_ylabel('Cumulative Mass, %')
+    ax_sum.set_ylim(0,1)
+    ax_MW.set_xlim(7,SCN[-1])
+    ax_MW.set_xlabel('Carbon Number')
+    ax_MW.set_ylabel('Mass Fraction of Plus')
+    plt.savefig('1_MW_fracsum.png',frameon=True,bbox_inches='tight',padinches=0.1)
+    plt.clf()
+
+    #===============================================================================
+    # Create dataframe for expanded set
+    MW_exp[0:ncomps_PS] = MW_PS
+    Pc_exp[0:ncomps_PS] = Pc_PS
+    Tc_exp[0:ncomps_PS] = Tc_PS
+    omega_exp[0:ncomps_PS] = omega_PS
+    y_exp[0:ncomps_PS] = y_PS
+    z_exp[0:ncomps_PS] = z_PS
+
+    z_exp[-1*z_cnexp.size:] = z_cnexp
+    MW_exp[-1*MW_cnexp.size:] = MW_cnexp
+    rho_exp[-1*rho_cnexp.size:] = rho_cnexp
+    omega_exp[-1*omega_cnexp.size:] = omega_cnexp
+    Pc_exp[-1*Pc_cnexp.size:] = Pc_cnexp
+    Tc_exp[-1*Tc_cnexp.size:] = Tc_cnexp
+
+    comps_exp[0:ncomps_PS] = F8Comp['comp'].as_matrix()[0:ncomps_PS]
+    for i in np.arange(ncomps_PS,comps_exp.size - 1):
+        name = 'C' + np.str(i-ncomps_PS + c_min)
+        comps_exp[i] = name
+    name = 'C' + np.str(i-ncomps_PS + 1 + c_min) + '+'
+    comps_exp[-1] = name
+
+    #x_exp = 1.0 - y_exp
+    #F8Exp = pd.DataFrame({'comp':comps_exp,'z':z_exp,'MW':MW_exp,'rho':rho_exp,'y':y_exp,'x':x_exp,
+    #                      'Pc':Pc_exp,'Tc':Tc_exp,'omega':omega_exp})
+    F8Exp = pd.DataFrame({'comp':comps_exp,'z':z_exp,'MW':MW_exp,'rho':rho_exp,'y':y_exp,
+                          'Pc':Pc_exp,'Tc':Tc_exp,'omega':omega_exp,'om_a':om_a_exp,'om_b':om_b_exp})
+    kij = np.zeros([Pc_exp.size,Pc_exp.size])
+    kij[:10,:10] = kij_base
+    kij[10:,0] = kij_base[9,0]
+    kij[10:,1] = kij_base[9,1]
+    kij[0,9:] = kij_base[0,9]
+    kij[1,9:] = kij_base[1,9]
+    F8Exp.kij = kij.copy()
+    F8Exp.Tres = F8Comp.Tres
+    F8Exp.Pres = F8Comp.Psat
+
+
+    mn_exp = coeff[9] + coeff[10]*MW_exp + coeff[11]*rho_exp/1000 + coeff[12]*(MW_exp**2)
+    wroots = 0.480 - (coeff[9] + coeff[10]*MW_exp + coeff[11]*rho_exp/1000 + coeff[12]*MW_exp**2)
+    wn_exp = np.zeros(mn_exp.size)
+
+    for i in np.arange(0,mn_exp.size):
+        wn_exp[i] = np.min( np.roots([-0.176, 1.574,wroots[i] ]) )
+    F8Exp['wn'] = wn_exp    
+
+    return F8Exp
+
+def EqualWeightIndex(WnL,Ng):
+    # Split into equal weighted portions
+    cum_WnL = WnL.cumsum() / WnL.sum()
+    WnL_idx = np.searchsorted(cum_WnL, np.linspace(0,1,Ng,endpoint=False)[1:])
+    return WnL_idx
+
+
+# Similar abhoration of a function for lumping
+
+
+
+
 ################################################################################
 # BLATANTLY STOLEN FUNCTIONS
 ################################################################################     
@@ -1599,7 +1891,8 @@ for i in range(0,1000):
 # Construct MF array for expansion
 z_exp   = Ped_z(A,B,SCN)
 MW_exp  = Ped_MW(SCN)
-
+z_exp_init = z_exp.copy()
+MW_exp_init = MW_exp.copy()
 
 # Solve for C and D
 
@@ -1702,8 +1995,8 @@ cummass   = np.cumsum(z) / np.sum(z)
 #cummass[c_min:]   = z[c_min:]
 #cummass[:c_min]   =   np.cumsum(cummass[:c_min])
 #cummass[c_min:]   =   np.cumsum(cummass[c_min:])  + (1 - z_cnplus)
-    
-    
+# wn for SRK
+
 ##############################################################################80
 # Generate Plots of Extrapolated Values
 ##############################################################################80
@@ -1719,8 +2012,7 @@ ax_MF.set_ylabel('Mole Fraction')
 ax_MF.set_xlabel('Carbon Number')
 ax_rho.set_ylabel('Density, g/cc')
 plt.savefig('1_rho_MF.png',frameon=True,bbox_inches='tight',padinches=0.1)
-plt.clf()
-
+plt.close('all')
 # Pc, Tc, cmin to cmax
 fig, ax_Pc  = plt.subplots(figsize=(10, 5))
 ax_Tc       = ax_Pc.twinx()
@@ -1937,12 +2229,12 @@ MW_PS[-1]     = PS_MW(z[C_G4],MW[C_G4])
 z_PS[np.argmax(z_PS[-4:])] = z_PS[np.argmax(z_PS[-4:])] + (1.000000000001 - np.sum(z_PS))
 #===============================================================================
 # Create dataframe for expanded set
-MW_exp[0:ncomps_PS] = MW_PS
-Pc_exp[0:ncomps_PS] = Pc_PS
-Tc_exp[0:ncomps_PS] = Tc_PS
-omega_exp[0:ncomps_PS] = omega_PS
-y_exp[0:ncomps_PS] = y_PS
-z_exp[0:ncomps_PS] = z_PS
+MW_exp[0:ncomps_PS] = MW_in[0:ncomps_PS]
+Pc_exp[0:ncomps_PS] = Pc_in[0:ncomps_PS]
+Tc_exp[0:ncomps_PS] = Tc_in[0:ncomps_PS]
+omega_exp[0:ncomps_PS] = omega_in[0:ncomps_PS]
+y_exp[0:ncomps_PS] = y_in[0:ncomps_PS]
+z_exp[0:ncomps_PS] = z_in[0:ncomps_PS]
 
 z_exp[-1*z_cnexp.size:] = z_cnexp
 MW_exp[-1*MW_cnexp.size:] = MW_cnexp
@@ -1972,6 +2264,15 @@ kij[1,9:] = kij_base[1,9]
 F8Exp.kij = kij.copy()
 F8Exp.Tres = F8Comp.Tres
 F8Exp.Pres = F8Comp.Psat
+
+
+mn_exp = coeff[9] + coeff[10]*MW_exp + coeff[11]*rho_exp/1000 + coeff[12]*(MW_exp**2)
+wroots = 0.480 - (coeff[9] + coeff[10]*MW_exp + coeff[11]*rho_exp/1000 + coeff[12]*MW_exp**2)
+wn_exp = np.zeros(mn_exp.size)
+
+for i in np.arange(0,mn_exp.size):
+    wn_exp[i] = np.min( np.roots([-0.176, 1.574,wroots[i] ]) )
+F8Exp['wn'] = wn_exp    
 #===============================================================================
 # DataFrame for reduced set
 
@@ -1980,6 +2281,8 @@ comps_PS[-4] = 'CL1'
 comps_PS[-3] = 'CL2'
 comps_PS[-2] = 'CL3'
 comps_PS[-1] = 'CL4'
+
+
 #F8Reduced = pd.DataFrame({'comp':comps_PS,'z':z_PS,'MW':MW_PS,'y':y_PS,'x':x_PS,
 #                      'Pc':Pc_PS,'Tc':Tc_PS,'omega':omega_PS})
 F8Reduced = pd.DataFrame({'comp':comps_PS,'z':z_PS,'MW':MW_PS,'y':y_PS,
@@ -1993,6 +2296,8 @@ kij[1,9:] = kij_base[1,9]
 F8Reduced.kij = kij.copy()
 F8Reduced.Tres = F8Comp.Tres
 F8Reduced.Pres = F8Comp.Psat                     
+
+
 ################################################################################
 # Simple Verification Set
 #-------------------------------------------------------------------------------
@@ -2217,25 +2522,25 @@ SimpleSet.Pref = Pref
 #Tc = SimpleSet.Tc.as_matrix()
 #z = SimpleSet.z.as_matrix()
 #omega = SimpleSet.omega.as_matrix()
-#kij = SimpleSet.kij
-Pc = F8Comp.Pc.as_matrix()
-Tc = F8Comp.Tc.as_matrix()
-z = F8Comp.z.as_matrix()
-omega = F8Comp.omega.as_matrix()
-kij = F8Comp.kij
-################################################################################
-# Verification using Thermo
-# Following CME test from bar to pascal
-P_range = np.linspace(500,1,201)*100000. # Pa
-T = 394.2        # K
+##kij = SimpleSet.kij
+#Pc = F8Comp.Pc.as_matrix()
+#Tc = F8Comp.Tc.as_matrix()
+#z = F8Comp.z.as_matrix()
+#omega = F8Comp.omega.as_matrix()
+#kij = F8Comp.kij
+#################################################################################
+## Verification using Thermo
+## Following CME test from bar to pascal
+#P_range = np.linspace(500,1,201)*100000. # Pa
+#T = 394.2        # K
 
-# Baseline Volume
-#eos = SRKMIX(T=T,P=P_range[0],Tcs=Tc,Pcs=Pc*101325.,omegas=omega,zs=z,kijs=kij)
-#Vs_fast = eos.volume_solutions(T, P_range[0], eos.b, eos.delta, eos.epsilon, eos.a_alpha) 
-#Vs = np.real(Vs_fast[np.flatnonzero(np.iscomplex(Vs_fast) == False)])
+## Baseline Volume
+##eos = SRKMIX(T=T,P=P_range[0],Tcs=Tc,Pcs=Pc*101325.,omegas=omega,zs=z,kijs=kij)
+##Vs_fast = eos.volume_solutions(T, P_range[0], eos.b, eos.delta, eos.epsilon, eos.a_alpha) 
+##Vs = np.real(Vs_fast[np.flatnonzero(np.iscomplex(Vs_fast) == False)])
 
 
-T_range = np.zeros(P_range.size)
+#T_range = np.zeros(P_range.size)
 #for i in np.arange(0,P_range.size):
 #    eos = th.eos_mix.SRKMIX(T=T,P=P_range[i],Tcs=Tc,Pcs=Pc*101325.,omegas=omega,zs=z,kijs=kij)
 #    print eos.phase
@@ -2904,27 +3209,27 @@ def rescon(Tc,Pc,z,omega,ncomps,MW,kij,om_a,om_b,CME_T_res,DDE_T_res,tol,R,T,n,r
 #
 # Pc, Tc, omega, om_a, om_b
 # DO NOT TOUCH kij!!
-tol = 1e-6
+#tol = 1e-6
 
 
 
-Tc = F8Reduced.Tc.as_matrix()
-Pc = F8Reduced.Pc.as_matrix()
-z = F8Reduced.z.as_matrix()
-omega = F8Reduced.omega.as_matrix()
-ncomps = F8Reduced.Tc.size
-MW = F8Reduced.MW.as_matrix()
-kij = F8Reduced.kij
+#Tc = F8Reduced.Tc.as_matrix()
+#Pc = F8Reduced.Pc.as_matrix()
+#z = F8Reduced.z.as_matrix()
+#omega = F8Reduced.omega.as_matrix()
+#ncomps = F8Reduced.Tc.size
+#MW = F8Reduced.MW.as_matrix()
+#kij = F8Reduced.kij
 
-numPC = 4
-input_matrix = np.zeros([z.size,5])
-input_matrix[:,0] = Pc
-input_matrix[:,1] = Tc
-input_matrix[:,2] = omega
-input_matrix[:,3] = om_a
-input_matrix[:,4] = om_b
+#numPC = 4
+#input_matrix = np.zeros([z.size,5])
+#input_matrix[:,0] = Pc
+#input_matrix[:,1] = Tc
+#input_matrix[:,2] = omega
+#input_matrix[:,3] = om_a
+#input_matrix[:,4] = om_b
 
-input_matrix = input_matrix.T.flatten()
+#input_matrix = input_matrix.T.flatten()
 
 
 def rescon_opt(input_matrix, *data):
@@ -2965,11 +3270,62 @@ def rescon_opt(input_matrix, *data):
 
 
     return error_list #np.abs(np.sum(error_list)), CME_check_matrix,DDE_check_matrix, output_CME_matrix,output_DDE_matrix
-
+tol = 1e-6
 run_num = 1
 data = (CME_T_res,DDE_T_res,z,ncomps,MW,kij,tol,R,T,n,run_num)
 
 # Close remaining plots left open
 plt.close('all')
 #def minattempt(input_matrix,data,numiter,run_num):
-    
+
+
+#### Lumping Function
+
+Ng = 4
+
+MWCnL = MW_exp[11:].copy()
+PcCnL = Pc_exp[11:].copy()
+TcCnL = Tc_exp[11:].copy()
+ZCnL = z_exp[11:].copy()
+densL = rho_exp[11:].copy()
+omegaCnL = omega_exp[11:].copy()
+
+
+def LumpCalc(MWCnL,PcCnL,TcCnL,ZCnL,densL,omegaCnL,Ng):
+    WnL = ZCnL*MWCnL
+
+    WnL_idx = EqualWeightIndex(WnL,Ng)
+
+    MW_LP = np.zeros(Ng)
+    Pc_LP = np.zeros(Ng)
+    Tc_LP = np.zeros(Ng)
+    ZC_LP = np.zeros(Ng)
+    omega_LP = np.zeros(Ng)
+    Wn_LP = np.zeros(Ng)
+
+    MW_Lumps = np.split(MWCnL,WnL_idx)
+    Tc_Lumps = np.split(TcCnL,WnL_idx)
+    Pc_Lumps = np.split(PcCnL,WnL_idx)
+    Z_Lumps = np.split(ZCnL,WnL_idx)
+    omega_Lumps = np.split(omegaCnL,WnL_idx)
+    Wn_Lumps = np.split(WnL,WnL_idx)
+
+    for i in np.arange(0,Ng):
+        Tc_LP[i] = PS_Tc(Z_Lumps[i],MW_Lumps[i],Tc_Lumps[i])
+        Pc_LP[i] = PS_Pc(Z_Lumps[i],MW_Lumps[i],Pc_Lumps[i])
+        omega_LP[i] = PS_omega(Z_Lumps[i],MW_Lumps[i],omega_Lumps[i])
+        ZC_LP[i] = np.sum(Z_Lumps[i])
+        MW_LP[i] = PS_MW(Z_Lumps[i],MW_Lumps[i])
+        Wn_LP[i] = np.sum(Wn_Lumps[i])
+    return MW_Lumps,Tc_Lumps,Pc_Lumps,Z_Lumps,omega_Lumps,Wn_Lumps,WnL_idx
+
+
+
+
+
+
+
+
+
+
+
